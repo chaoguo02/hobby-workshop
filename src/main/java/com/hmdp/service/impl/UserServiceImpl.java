@@ -43,7 +43,6 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements IU
 
     @Override
     public Result sendCode(String phone, HttpSession session) {
-
         // 1.校验手机号
         if(RegexUtils.isPhoneInvalid(phone)) {
             // 2.如果手机号是invalid（无效）的，返回错误信息
