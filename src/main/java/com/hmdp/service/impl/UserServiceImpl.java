@@ -48,7 +48,7 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements IU
             // 2.如果手机号是invalid（无效）的，返回错误信息
             return Result.fail("手机号格式错误");
         }
-        // 3. 符合，生成验证码
+        // 3. 手机号符合，生成验证码
         String code = RandomUtil.randomNumbers(6);
         // 4. 保存验证码到redis
         stringRedisTemplate.opsForValue().set(LOGIN_CODE_KEY + phone, code, LOGIN_CODE_TTL, TimeUnit.MINUTES);
@@ -73,14 +73,14 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements IU
             // 4.不一致，直接报错
             return Result.fail("验证码错误");
         }
-        // 5，一致，根据手机号查询用户
+        // 5，一致，根据手机号查询用户 select * from user where phone = #{phone}
         User user = query().eq("phone", phone).one();
         // 6.判断用户是否存在
         if(user == null) {
             // 7.不存在，创建新用户并保存
             user = createUserWithPhone(phone);
         }
-        // 8. 保存用户信息到redis中
+        // 8. 无论用户是否存在，都需要将旧用户或新用户 保存用户信息到redis中
         // 8.1 随机生成token，做为登录令牌
         String token = UUID.randomUUID().toString(true);
         // 8.2 将User对象转为HashMap存储
@@ -101,7 +101,7 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements IU
         User user = new User();
         user.setPhone(phone);
         user.setNickName(USER_NICK_NAME_PREFIX + RandomUtil.randomString(10));
-        // 保存用户
+        // 保存用户 insert into user (phone, nickname) values (#{phone}, #{nickname})
         save(user);
         return user;
     }
