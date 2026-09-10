@@ -22,6 +22,13 @@ end
 
 redis.call('incrby', stockKey, -1)
 redis.call('sadd', orderKey, userId)
--- 发送消息到队列中， XADD stream.orders * k1 v1 k2 v2 ...voucherId
--- redis.call('xadd', 'stream.orders', '*', 'userId', userId, 'voucherId', voucherId, 'id', orderId)
+-- 记录已准入的 orderId -> userId，作为 MySQL 补单的唯一依据（Redis 为真值，不回滚）
+-- 与扣库存、SADD 同脚本原子完成，保证「准入必可被补齐」
+redis.call('hset', 'seckill:admitted:' .. voucherId, orderId, userId)
+-- 让一人一单集合跟随库存 key 的生命周期过期，避免该集合随用户数无限增长。
+-- 库存 key 在活动结束（endTime + 缓冲）后过期，orderKey 在此之后不再被写入，故 TTL 只会随活动临近而缩短。
+local stockTtl = redis.call('ttl', stockKey)
+if (stockTtl > 0) then
+    redis.call('expire', orderKey, stockTtl)
+end
 return 0

@@ -35,3 +35,4 @@ build/
 ### 本地运行环境与密钥（不入库）###
 Tokens.txt
 front/
+.runtime/

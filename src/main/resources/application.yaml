@@ -36,9 +36,13 @@ spring:
       acks: all
       key-serializer: org.apache.kafka.common.serialization.StringSerializer
       value-serializer: org.springframework.kafka.support.serializer.JsonSerializer
+      properties:
+        enable.idempotence: true
     listener:
       ack-mode: manual_immediate
       auto-startup: true
+      # 分区数一致，多线程消费不同分区；分区内仍单线程，避免同一订单并发处理
+      concurrency: 3
 
 mybatis-plus:
   type-aliases-package: com.hmdp.entity # 别名扫描包

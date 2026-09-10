@@ -1282,4 +1282,21 @@ CREATE TABLE `tb_voucher_order`  (
 -- Records of tb_voucher_order
 -- ----------------------------
 
+-- ----------------------------
+-- Table structure for tb_seckill_message
+-- ----------------------------
+DROP TABLE IF EXISTS `tb_seckill_message`;
+CREATE TABLE `tb_seckill_message`  (
+  `order_id` bigint(20) NOT NULL COMMENT '订单id，同时作为消息唯一标识',
+  `user_id` bigint(20) UNSIGNED NOT NULL COMMENT '下单用户id',
+  `voucher_id` bigint(20) UNSIGNED NOT NULL COMMENT '购买的代金券id',
+  `status` tinyint(1) NOT NULL DEFAULT 0 COMMENT '投递状态：0 READY，1 PROCESSING，2 SENT，3 COMPLETED，4 FAILED',
+  `retry` int(11) NOT NULL DEFAULT 0 COMMENT '投递重试次数',
+  `next_retry_time` timestamp NULL DEFAULT NULL COMMENT '下次可投递时间（退避用）',
+  `create_time` timestamp(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) COMMENT '创建时间',
+  `update_time` timestamp(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3) COMMENT '更新时间',
+  PRIMARY KEY (`order_id`) USING BTREE,
+  INDEX `idx_status_create`(`status`, `create_time`) USING BTREE
+) ENGINE = InnoDB CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci ROW_FORMAT = Compact;
+
 SET FOREIGN_KEY_CHECKS = 1;
