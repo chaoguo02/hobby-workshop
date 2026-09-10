@@ -70,9 +70,25 @@ public class CacheClient {
         String key = keyPrefix + id;
         String json = stringRedisTemplate.opsForValue().get(key);
         // 2. 缓存是否存在
+        // 应该先去判断一下缓存的是空值，还是没有这个缓存
+        // 如果是没有这个缓存空值的话直接返回null，否则都应该去重建缓存
+
         if(StrUtil.isBlank(json)){
-            return null;
+            // 如果存在说明是缓存的空值
+            if(Boolean.TRUE.equals(stringRedisTemplate.hasKey(key)))
+                return null;
+            // 如果不存在说明是这是第一次查询，所以要构建一下缓存
+            else{
+                // 构建缓存
+                R r1 = dbFallback.apply(id);
+                this.setWithLogicalExpire(key, r1, time,timeUnit);
+                return null;
+            }
         }
+
+        // 如果没有的话，新建缓存
+
+
         /** 命中，需要先把json反序列化为对象
          *  判断是否过期
          *  未过期，直接返回店铺信息
@@ -83,18 +99,25 @@ public class CacheClient {
          *  成功，开启独立线程，实现缓存重建
          *  返回过期的商铺信息
          */
+        // 3.命中，需要先把json反序列化为对象
         RedisData redisData = JSONUtil.toBean(json, RedisData.class);
         JSONObject data = (JSONObject) redisData.getData();
         R r = JSONUtil.toBean(data, type);
         LocalDateTime expireTime = redisData.getExpireTime();
-
+        // 4.判断是否过期
         if(expireTime.isAfter(LocalDateTime.now()) ){
+            // 4.1 未过期，直接返回店铺信息
             return r;
         }
-
+        // 4.2 已过期，需要缓存重建
+        // 缓存重建
         String lockKey = RedisConstants.LOCK_SHOP_KEY + id;
+        // 5 获取互斥锁
         boolean isLock = tryLock(lockKey);
         if(isLock){
+            log.debug("获取到互斥锁，开始重建缓存");
+            // 获取互斥锁成功，开启独立线程，实现缓存重建，获取成功后，再简称为redis缓存是否过期，做DoubleCheck
+            // 如果DoubleCheck存在，则无需重建缓存
             CACHE_REBUILD_EXECUTOR.submit(
                     ()->{
                         try {
@@ -142,6 +165,7 @@ public class CacheClient {
                 Thread.sleep(50);
                 return queryWithMutex(time, timeUnit, keyPrefix, id, type, dbFallback);
             }
+            // 根据id查询到数据库数据
             r = dbFallback.apply(id);
             // 5. 不存在返回错误
             if(r == null){
@@ -167,10 +191,13 @@ public class CacheClient {
      * 获取和释放锁
      */
     private boolean tryLock(String key){
-        Boolean flag = stringRedisTemplate.opsForValue().setIfAbsent(key, "1",10,TimeUnit.SECONDS);
+        // set key value nx ex 加锁
+        Boolean flag = stringRedisTemplate.opsForValue().setIfAbsent(key, "1", 10, TimeUnit.SECONDS);
         return BooleanUtil.isTrue(flag);
     }
     private void unlock(String key){
         stringRedisTemplate.delete(key);
     }
+
+
 }

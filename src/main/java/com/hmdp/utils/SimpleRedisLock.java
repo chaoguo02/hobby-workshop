@@ -40,7 +40,11 @@ public class SimpleRedisLock implements ILock{
 
         return Boolean.TRUE.equals(success);
     }
-//
+
+
+    /*
+        获取锁标识和释放锁是两步操作，如果获取锁标识后发生了阻塞，会导致两个线程并行
+     */
 //    @Override
 //    public void unlock() {
 //        // 获取线程ID标识
@@ -64,4 +68,5 @@ public class SimpleRedisLock implements ILock{
                 Collections.singletonList(KEY_PREFIX + name),
                 ID_PREFIX + Thread.currentThread().getId());
     }
+
 }

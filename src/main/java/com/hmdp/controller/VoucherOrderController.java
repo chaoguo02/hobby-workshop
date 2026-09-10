@@ -21,9 +21,12 @@ import javax.annotation.Resource;
 @RestController
 @RequestMapping("/voucher-order")
 public class VoucherOrderController {
-    @Resource
+    // 本地默认使用同步实现，不依赖 Kafka；Kafka 实验可切换为 voucherOrderServiceImpl_kafka
+    @Resource(name = "voucherOrderServiceImpl_sync")
     private IVoucherOrderService voucherOrderService;
-
+    /*
+    实现秒杀
+     */
     @PostMapping("seckill/{id}")
     public Result seckillVoucher(@PathVariable("id") Long voucherId) {
         return voucherOrderService.seckillVoucher(voucherId);

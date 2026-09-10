@@ -11,7 +11,7 @@ spring:
   redis:
     host: 127.0.0.1
     port: 6379
-    password: 123456
+    # password: 123456
     lettuce:
       pool:
         max-active: 10
@@ -20,6 +20,26 @@ spring:
         time-between-eviction-runs: 10s
   jackson:
     default-property-inclusion: non_null # JSON处理时忽略非空字段
+
+  kafka:
+    bootstrap-servers: localhost:9092
+    consumer:
+      group-id: voucher-order-group
+      enable-auto-commit: false
+      auto-offset-reset: earliest
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.springframework.kafka.support.serializer.JsonDeserializer
+      properties:
+        spring.json.trusted.packages: "com.hmdp.entity"
+        spring.json.value.default.type: com.hmdp.entity.VoucherOrder
+    producer:
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.springframework.kafka.support.serializer.JsonSerializer
+    listener:
+      ack-mode: manual_immediate
+      # 本地默认不启动 Kafka 消费者；需要测试 Kafka 秒杀方案时改为 true
+      auto-startup: false
+
 mybatis-plus:
   type-aliases-package: com.hmdp.entity # 别名扫描包
 logging:
