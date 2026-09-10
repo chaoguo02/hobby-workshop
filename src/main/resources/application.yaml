@@ -33,6 +33,7 @@ spring:
         spring.json.trusted.packages: "com.hmdp.entity"
         spring.json.value.default.type: com.hmdp.entity.VoucherOrder
     producer:
+      acks: all
       key-serializer: org.apache.kafka.common.serialization.StringSerializer
       value-serializer: org.springframework.kafka.support.serializer.JsonSerializer
     listener:

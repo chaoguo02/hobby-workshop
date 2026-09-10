@@ -11,7 +11,6 @@ import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.kafka.listener.ContainerProperties;
 import org.springframework.kafka.listener.DeadLetterPublishingRecoverer;
 import org.springframework.kafka.listener.SeekToCurrentErrorHandler;
-import org.springframework.kafka.support.converter.StringJsonMessageConverter;
 import org.springframework.util.backoff.FixedBackOff;
 
 @Configuration
@@ -25,7 +24,6 @@ public class KafkaConsumerConfig {
         ConcurrentKafkaListenerContainerFactory<Object, Object> factory =
                 new ConcurrentKafkaListenerContainerFactory<>();
         configurer.configure(factory, consumerFactory);
-        factory.setMessageConverter(new StringJsonMessageConverter());
         factory.getContainerProperties().setAckMode(ContainerProperties.AckMode.MANUAL_IMMEDIATE);
         factory.setErrorHandler(kafkaErrorHandler(kafkaTemplate));
         return factory;

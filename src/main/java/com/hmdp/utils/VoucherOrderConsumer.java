@@ -3,14 +3,10 @@ package com.hmdp.utils;
 import com.hmdp.entity.VoucherOrder;
 import com.hmdp.service.IVoucherOrderService;
 import lombok.extern.slf4j.Slf4j;
-import org.redisson.api.RLock;
-import org.redisson.api.RedissonClient;
+import org.springframework.dao.DuplicateKeyException;
 import org.springframework.kafka.annotation.KafkaListener;
 import org.springframework.kafka.support.Acknowledgment;
 import org.springframework.stereotype.Component;
-import org.springframework.transaction.annotation.Transactional;
-import org.springframework.transaction.support.TransactionSynchronization;
-import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 import javax.annotation.Resource;
 
@@ -21,38 +17,29 @@ public class VoucherOrderConsumer {
     @Resource(name = "voucherOrderServiceImpl_kafka")
     private IVoucherOrderService voucherOrderService;
 
-    @Resource
-    private RedissonClient redissonClient;
-
-    @Transactional(rollbackFor = Exception.class)
     @KafkaListener(topics = "voucher-orders", groupId = "voucher-order-group")
     public void handleVoucherOrder(VoucherOrder voucherOrder, Acknowledgment acknowledgment) {
+        log.info("收到 Kafka 秒杀订单，orderId={}, userId={}, voucherId={}",
+                voucherOrder.getId(), voucherOrder.getUserId(), voucherOrder.getVoucherId());
         if (voucherOrderService.getById(voucherOrder.getId()) != null) {
             log.info("订单已处理，直接确认消息，orderId={}", voucherOrder.getId());
             acknowledgment.acknowledge();
             return;
         }
 
-        Long userId = voucherOrder.getUserId();
-        RLock lock = redissonClient.getLock("lock:order:" + userId);
-        boolean isLock = lock.tryLock();
-        if (!isLock) {
-            throw new IllegalStateException("用户订单正在处理中，userId=" + userId);
-        }
-
         try {
+            // Service 正常返回时，其内部 MySQL 事务已经提交
             voucherOrderService.createVoucherOrder(voucherOrder);
-            TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
-                @Override
-                public void afterCommit() {
-                    acknowledgment.acknowledge();
-                }
-            });
+            acknowledgment.acknowledge();
+            log.info("Kafka 秒杀订单已确认，orderId={}", voucherOrder.getId());
+        } catch (DuplicateKeyException e) {
+            // orderId 主键或 (user_id, voucher_id) 唯一键冲突都视为已处理
+            log.info("秒杀订单触发唯一键，跳过重复处理并确认消息，orderId={}, userId={}, voucherId={}",
+                    voucherOrder.getId(), voucherOrder.getUserId(), voucherOrder.getVoucherId());
+            acknowledgment.acknowledge();
         } catch (RuntimeException e) {
             log.error("处理订单异常，orderId={}", voucherOrder.getId(), e);
             throw e;
-        } finally {
-            lock.unlock();
         }
     }
 }
