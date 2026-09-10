@@ -108,11 +108,18 @@ SOURCE D:/StudyProjects/ProjectBench/hobby-workshop/src/main/resources/db/hmdp.s
 spring:
   datasource:
     url: jdbc:mysql://127.0.0.1:3306/hmdp?useSSL=false&serverTimezone=UTC
-    username: root
-    password: abc123
+    username: ${DB_USERNAME:root}
+    password: ${DB_PASSWORD}
 ```
 
-请按本机情况修改用户名和密码。也可以在启动时覆盖密码，避免直接改文件：
+密码不再写进配置文件，启动前通过环境变量提供（`DB_USERNAME` 可省略，默认 `root`）：
+
+```powershell
+$env:DB_PASSWORD = "你的密码"
+mvn spring-boot:run
+```
+
+也可以只对单次启动生效：
 
 ```powershell
 mvn spring-boot:run "-Dspring-boot.run.arguments=--spring.datasource.username=root --spring.datasource.password=你的密码"

@@ -6,12 +6,12 @@ spring:
   datasource:
     driver-class-name: com.mysql.jdbc.Driver
     url: jdbc:mysql://127.0.0.1:3306/hmdp?useSSL=false&serverTimezone=UTC
-    username: root
-    password: abc123
+    username: ${DB_USERNAME:root}
+    password: ${DB_PASSWORD}
   redis:
     host: 127.0.0.1
     port: 6379
-    # password: 123456
+    # password: ${REDIS_PASSWORD:}
     lettuce:
       pool:
         max-active: 10
