@@ -18,7 +18,7 @@
 | 应用 | `http://localhost:8081` | 是 |
 | MySQL | `127.0.0.1:3306`，数据库 `hmdp` | 是 |
 | Redis | `127.0.0.1:6379`，当前配置无密码 | 是 |
-| Kafka | `localhost:9092` | 否，本地默认关闭；仅 Kafka 秒杀实验需要 |
+| Kafka | `localhost:9092` | 是，当前秒杀链路使用 Kafka |
 
 ## 启动前准备
 
@@ -40,9 +40,9 @@
    
    Redis 必须监听 `6379`。当前 Redisson 地址在 `RedissonConfig.java` 中写死为 `redis://localhost:6379`，并且没有设置密码。
 
-5. **Kafka（可选）**
+5. **Kafka**
    
-   本地默认使用同步秒杀实现，并关闭 Kafka Listener，不启动 Kafka 也能运行。切换到 Kafka 秒杀方案后，Kafka 必须监听 `9092`；订单使用 `voucher-orders` topic，消费失败后进入 `voucher-orders.DLT`。
+   Kafka 必须监听 `9092`。当前秒杀接口使用 `voucher-orders` topic 投递订单，消费失败后进入 `voucher-orders.DLT`。
 
 本机已安装的 Kafka 是 3.9.0。Kafka 进程请使用 JDK 17（或 JDK 21），后端项目使用 JDK 8；分别在不同终端中设置 `JAVA_HOME`，互不影响。
 
@@ -144,8 +144,6 @@ PONG
 当前 Redis 6.2.10 使用无密码配置，`application.yaml` 中的密码也保持注释。`RedissonConfig` 已调整为读取 `spring.redis` 的主机、端口和可选密码；如果以后启用密码，需要同时修改 Redis 配置和 `application.yaml`。
 
 ## 3. 启动 Kafka
-
-本节仅在测试 Kafka 异步秒杀方案时需要，普通本地启动可以跳过。启用时，先将 `application.yaml` 中的 `spring.kafka.listener.auto-startup` 改为 `true`，并将 `VoucherOrderController` 注入的 Bean 改为 `voucherOrderServiceImpl_kafka`。
 
 确保 Kafka broker 可从 `localhost:9092` 访问。若 broker 禁止自动创建 topic，请手动创建：
 

@@ -21,8 +21,7 @@ import javax.annotation.Resource;
 @RestController
 @RequestMapping("/voucher-order")
 public class VoucherOrderController {
-    // 本地默认使用同步实现，不依赖 Kafka；Kafka 实验可切换为 voucherOrderServiceImpl_kafka
-    @Resource(name = "voucherOrderServiceImpl_sync")
+    @Resource(name = "voucherOrderServiceImpl_kafka")
     private IVoucherOrderService voucherOrderService;
     /*
     实现秒杀

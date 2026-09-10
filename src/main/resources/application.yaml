@@ -37,8 +37,7 @@ spring:
       value-serializer: org.springframework.kafka.support.serializer.JsonSerializer
     listener:
       ack-mode: manual_immediate
-      # 本地默认不启动 Kafka 消费者；需要测试 Kafka 秒杀方案时改为 true
-      auto-startup: false
+      auto-startup: true
 
 mybatis-plus:
   type-aliases-package: com.hmdp.entity # 别名扫描包
