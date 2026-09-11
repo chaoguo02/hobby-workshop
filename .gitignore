@@ -36,3 +36,5 @@ build/
 Tokens.txt
 front/
 .runtime/
+.env
+.claude/

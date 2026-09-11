@@ -3,11 +3,18 @@ server:
 spring:
   application:
     name: hmdp
+  task:
+    scheduling:
+      # Relay、恢复、对账和监控任务不共用默认单线程，避免某个外部依赖超时阻塞其它任务。
+      pool:
+        size: 4
   datasource:
     driver-class-name: com.mysql.jdbc.Driver
     url: jdbc:mysql://127.0.0.1:3306/hmdp?useSSL=false&serverTimezone=UTC
+    # 默认值面向本地开发：直接运行 HmDianPingApplication 即可启动，无需先设置环境变量。
+    # 需要覆盖时（其它机器/CI）设置 DB_USERNAME / DB_PASSWORD 环境变量即可。
     username: ${DB_USERNAME:root}
-    password: ${DB_PASSWORD}
+    password: ${DB_PASSWORD:abc123}
   redis:
     host: 127.0.0.1
     port: 6379
@@ -44,8 +51,35 @@ spring:
       # 分区数一致，多线程消费不同分区；分区内仍单线程，避免同一订单并发处理
       concurrency: 3
 
+seckill:
+  monitor:
+    # /monitor/** 的固定管理员令牌（请求头 X-Monitor-Token），不是登录 token、不会每次变化。
+    # 带本地默认值便于直接运行调试；生产/CI 用 MONITOR_ADMIN_TOKEN 覆盖。为空则该组端点一律 403。
+    admin-token: ${MONITOR_ADMIN_TOKEN:6f3c1d9a2b7e4f80a5c6d1e293b47f5a}
+  timeline:
+    # 是否记录秒杀链路时间线（tb_seckill_message_event，每笔订单每阶段一次 insert）。
+    # 观测价值高但会额外增加 DB 写；压测时可置 false 关掉，事件与清理任务都会 no-op。
+    enabled: ${SECKILL_TIMELINE_ENABLED:true}
+
+workshop:
+  order:
+    payment-timeout-seconds: ${WORKSHOP_PAYMENT_TIMEOUT_SECONDS:900}
+    close-scan-delay-ms: ${WORKSHOP_CLOSE_SCAN_DELAY_MS:5000}
+    close-batch-size: ${WORKSHOP_CLOSE_BATCH_SIZE:100}
+
+cache:
+  prewarm:
+    enabled: ${CACHE_PREWARM_ENABLED:false}
+    # 只配置确定的热点店铺，例如 1,2,10；默认不预热，避免启动时全表加载。
+    shop-ids: ${CACHE_PREWARM_SHOP_IDS:}
+  invalidation:
+    retry-interval-ms: 5000
+    cleanup-cron: "0 20 3 * * ?"
+
 mybatis-plus:
   type-aliases-package: com.hmdp.entity # 别名扫描包
 logging:
   level:
     com.hmdp: debug
+    # 定时任务每 500ms 扫一次 outbox，mapper 的 SQL 日志会刷屏、淹没业务流转日志，单独压到 info
+    com.hmdp.mapper: info
