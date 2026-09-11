@@ -3,6 +3,7 @@ package com.hmdp.utils;
 import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
 import com.hmdp.entity.SeckillMessage;
 import com.hmdp.mapper.SeckillMessageMapper;
+import com.hmdp.monitor.SeckillEventLogger;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.data.redis.core.Cursor;
@@ -40,6 +41,9 @@ public class SeckillMessageRecoveryTask {
     @Resource
     private SeckillMessageMapper seckillMessageMapper;
 
+    @Resource
+    private SeckillEventLogger seckillEventLogger;
+
     @Scheduled(fixedDelay = 30000)
     public void recover() {
         Set<String> keys = scanKeys(ADMITTED_KEY_PREFIX + "*");
@@ -66,11 +70,7 @@ public class SeckillMessageRecoveryTask {
     }
 
     private void recoverVoucher(String key) {
-        Map<Object, Object> admitted = stringRedisTemplate.opsForHash().entries(key);
-        if (admitted.isEmpty()) {
-            return;
-        }
-        // 提取 voucherId 与 orderId -> userId 映射
+        // 提取 voucherId
         Long voucherId;
         try {
             voucherId = Long.valueOf(key.substring(ADMITTED_KEY_PREFIX.length()));
@@ -78,46 +78,76 @@ public class SeckillMessageRecoveryTask {
             log.warn("无法从 key 解析 voucherId，跳过：{}", key);
             return;
         }
-        List<Long> orderIds = new ArrayList<>(admitted.size());
-        Map<Long, Long> userByOrder = new HashMap<>(admitted.size());
-        for (Map.Entry<Object, Object> entry : admitted.entrySet()) {
-            Long orderId = Long.valueOf(entry.getKey().toString());
-            orderIds.add(orderId);
-            userByOrder.put(orderId, Long.valueOf(entry.getValue().toString()));
-        }
-
+        // 用 HSCAN 游标分批遍历：HGETALL 在热点券下会把整个 Hash（可能几十万 field）一次性拉进内存，
+        // 这里每轮只驻留 CHUNK_SIZE 条 orderId -> userId，处理完立即释放。
+        ScanOptions options = ScanOptions.scanOptions().count(SCAN_COUNT).build();
+        List<Long> orderIds = new ArrayList<>(CHUNK_SIZE);
+        Map<Long, Long> userByOrder = new HashMap<>(CHUNK_SIZE);
         List<String> completedFields = new ArrayList<>();
-        for (int start = 0; start < orderIds.size(); start += CHUNK_SIZE) {
-            List<Long> slice = orderIds.subList(start, Math.min(start + CHUNK_SIZE, orderIds.size()));
-            List<SeckillMessage> rows = seckillMessageMapper.selectList(
-                    new QueryWrapper<SeckillMessage>().in("order_id", slice));
-            Set<Long> existing = new HashSet<>();
-            for (SeckillMessage row : rows) {
-                existing.add(row.getOrderId());
-                if (row.getStatus() != null && row.getStatus() == SeckillMessage.STATUS_COMPLETED) {
-                    completedFields.add(row.getOrderId().toString());
-                }
-            }
-            for (Long orderId : slice) {
-                if (existing.contains(orderId)) {
-                    continue;
-                }
-                try {
-                    seckillMessageMapper.insert(new SeckillMessage()
-                            .setOrderId(orderId)
-                            .setUserId(userByOrder.get(orderId))
-                            .setVoucherId(voucherId)
-                            .setStatus(SeckillMessage.STATUS_READY)
-                            .setRetry(0));
-                    log.warn("依据 Redis 准入记录补齐缺失的本地消息，orderId={}, userId={}, voucherId={}",
-                            orderId, userByOrder.get(orderId), voucherId);
-                } catch (DuplicateKeyException e) {
-                    // 并发下已被其它线程补齐，忽略
+        try (Cursor<Map.Entry<Object, Object>> cursor = stringRedisTemplate.opsForHash().scan(key, options)) {
+            while (cursor.hasNext()) {
+                Map.Entry<Object, Object> entry = cursor.next();
+                Long orderId = Long.valueOf(entry.getKey().toString());
+                orderIds.add(orderId);
+                userByOrder.put(orderId, Long.valueOf(entry.getValue().toString()));
+                if (orderIds.size() >= CHUNK_SIZE) {
+                    processBatch(orderIds, userByOrder, voucherId, completedFields);
+                    orderIds.clear();
+                    userByOrder.clear();
                 }
             }
         }
-        if (!completedFields.isEmpty()) {
-            stringRedisTemplate.opsForHash().delete(key, completedFields.toArray());
+        if (!orderIds.isEmpty()) {
+            processBatch(orderIds, userByOrder, voucherId, completedFields);
+        }
+        // 游标关闭后再删，避免在 HSCAN 迭代过程中改 Hash；分批删以防单条命令参数过多
+        for (int start = 0; start < completedFields.size(); start += CHUNK_SIZE) {
+            List<String> slice = completedFields.subList(
+                    start, Math.min(start + CHUNK_SIZE, completedFields.size()));
+            stringRedisTemplate.opsForHash().delete(key, slice.toArray());
+            for (String field : slice) {
+                try {
+                    seckillEventLogger.info(Long.valueOf(field), null, voucherId,
+                            SeckillEventLogger.STAGE_RECOVERY_CLEANUP,
+                            "订单已落库，回收 Redis seckill:admitted 准入记录，链路完全收尾");
+                } catch (NumberFormatException ignored) {
+                    // field 非数字，跳过埋点
+                }
+            }
+        }
+    }
+
+    /** 核对一批已准入 orderId：MySQL 缺失的补插 READY，已 COMPLETED 的登记待清理 */
+    private void processBatch(List<Long> orderIds, Map<Long, Long> userByOrder,
+                              Long voucherId, List<String> completedFields) {
+        List<SeckillMessage> rows = seckillMessageMapper.selectList(
+                new QueryWrapper<SeckillMessage>().in("order_id", orderIds));
+        Set<Long> existing = new HashSet<>();
+        for (SeckillMessage row : rows) {
+            existing.add(row.getOrderId());
+            if (row.getStatus() != null && row.getStatus() == SeckillMessage.STATUS_COMPLETED) {
+                completedFields.add(row.getOrderId().toString());
+            }
+        }
+        for (Long orderId : orderIds) {
+            if (existing.contains(orderId)) {
+                continue;
+            }
+            try {
+                seckillMessageMapper.insert(new SeckillMessage()
+                        .setOrderId(orderId)
+                        .setUserId(userByOrder.get(orderId))
+                        .setVoucherId(voucherId)
+                        .setStatus(SeckillMessage.STATUS_READY)
+                        .setRetry(0));
+                seckillEventLogger.warn(orderId, userByOrder.get(orderId), voucherId,
+                        SeckillEventLogger.STAGE_RECOVERY_BACKFILL,
+                        "Redis 已准入但 outbox 缺失（请求线程写库失败），恢复任务补插 READY，重新走投递");
+                log.warn("依据 Redis 准入记录补齐缺失的本地消息，orderId={}, userId={}, voucherId={}",
+                        orderId, userByOrder.get(orderId), voucherId);
+            } catch (DuplicateKeyException e) {
+                // 并发下已被其它线程补齐，忽略
+            }
         }
     }
 }

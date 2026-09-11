@@ -30,7 +30,10 @@ public class SeckillMessage implements Serializable {
     public static final int STATUS_SENT = 2;
     /** 订单已落库并扣减库存（与业务同事务提交，链路的终点） */
     public static final int STATUS_COMPLETED = 3;
-    /** 重投多次仍未完成，终态，等待人工处理 */
+    /**
+     * 重投多次仍未完成：用于告警，并转入更长的慢速退避通道由 relay 继续自动重试。
+     * 不是终态——人工重放只用于清零退避、加速处理，不作为唯一恢复手段。
+     */
     public static final int STATUS_FAILED = 4;
 
     /**

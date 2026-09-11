@@ -5,6 +5,7 @@ import com.baomidou.mybatisplus.core.conditions.update.UpdateWrapper;
 import com.hmdp.entity.SeckillMessage;
 import com.hmdp.entity.VoucherOrder;
 import com.hmdp.mapper.SeckillMessageMapper;
+import com.hmdp.monitor.SeckillEventLogger;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.kafka.support.SendResult;
@@ -23,7 +24,10 @@ import java.util.List;
  * 本地消息表投递器：定时扫描待发送记录，投递 Kafka 成功回调里标记 SENT。
  * 先在一个事务里批量条件 UPDATE 抢占为 PROCESSING（多实例并行时只有抢到的那一个会发送）；
  * 发送走异步回调，不再用 get() 阻塞 relay 线程，单轮可派发整批消息。
- * 投递失败置回 READY 并设置 next_retry_time 退避。
+ * 投递失败按退避策略置回 READY（常规段）或 FAILED（告警段）并设置 next_retry_time。
+ *
+ * 同时扫描 READY 与 FAILED：FAILED 不是终态，只是退避更长的慢速通道，
+ * 到 next_retry_time 后仍会被这里自动重投，人工重放仅用于加速。
  */
 @Component
 @Slf4j
@@ -31,7 +35,6 @@ public class SeckillMessageRelay {
 
     private static final String VOUCHER_ORDER_TOPIC = "voucher-orders";
     private static final int BATCH_SIZE = 200;
-    private static final long MAX_BACKOFF_SECONDS = 300L;
 
     @Resource
     private SeckillMessageMapper seckillMessageMapper;
@@ -42,11 +45,14 @@ public class SeckillMessageRelay {
     @Resource
     private PlatformTransactionManager transactionManager;
 
+    @Resource
+    private SeckillEventLogger seckillEventLogger;
+
     @Scheduled(fixedDelay = 500)
     public void relay() {
         List<SeckillMessage> candidates = seckillMessageMapper.selectList(
                 new QueryWrapper<SeckillMessage>()
-                        .eq("status", SeckillMessage.STATUS_READY)
+                        .in("status", SeckillMessage.STATUS_READY, SeckillMessage.STATUS_FAILED)
                         .apply("(next_retry_time IS NULL OR next_retry_time <= NOW())")
                         .orderByAsc("create_time")
                         .last("limit " + BATCH_SIZE)
@@ -56,6 +62,10 @@ public class SeckillMessageRelay {
         List<SeckillMessage> claimed = claimBatch(candidates);
         claimNanos = System.nanoTime() - claimNanos;
         for (SeckillMessage message : claimed) {
+            int retryNo = (message.getRetry() == null ? 0 : message.getRetry()) + 1;
+            seckillEventLogger.info(message.getOrderId(), message.getUserId(), message.getVoucherId(),
+                    SeckillEventLogger.STAGE_RELAY_CLAIMED,
+                    "relay 抢占为 PROCESSING（第 " + retryNo + " 次投递），准备发送 Kafka");
             dispatch(message);
         }
         if (!claimed.isEmpty()) {
@@ -83,7 +93,7 @@ public class SeckillMessageRelay {
                 int updated = seckillMessageMapper.update(null,
                         new UpdateWrapper<SeckillMessage>()
                                 .eq("order_id", message.getOrderId())
-                                .eq("status", SeckillMessage.STATUS_READY)
+                                .in("status", SeckillMessage.STATUS_READY, SeckillMessage.STATUS_FAILED)
                                 .set("status", SeckillMessage.STATUS_PROCESSING));
                 if (updated > 0) {
                     result.add(message);
@@ -99,6 +109,8 @@ public class SeckillMessageRelay {
         voucherOrder.setId(message.getOrderId());
         voucherOrder.setUserId(message.getUserId());
         voucherOrder.setVoucherId(message.getVoucherId());
+        // 抢券成功先占用名额并生成待支付订单；支付完成后才产生核销资格。
+        voucherOrder.setStatus(VoucherOrder.STATUS_PENDING_PAYMENT);
         ListenableFuture<SendResult<String, VoucherOrder>> future;
         try {
             // 以 orderId 作为 key：订单之间互相独立（主键 + uk_user_voucher + Redis 一人一单），
@@ -107,7 +119,7 @@ public class SeckillMessageRelay {
                     VOUCHER_ORDER_TOPIC, message.getOrderId().toString(), voucherOrder);
         } catch (Exception e) {
             log.error("本地消息发送失败（同步抛错），退避后重试，orderId={}", message.getOrderId(), e);
-            releaseForRetry(message);
+            releaseForRetry(message, e.getMessage());
             return;
         }
         future.addCallback(
@@ -118,6 +130,10 @@ public class SeckillMessageRelay {
                                     .eq("status", SeckillMessage.STATUS_PROCESSING)
                                     .set("status", SeckillMessage.STATUS_SENT));
                     if (updated > 0) {
+                        seckillEventLogger.info(message.getOrderId(), message.getUserId(), message.getVoucherId(),
+                                SeckillEventLogger.STAGE_KAFKA_SENT,
+                                "已送达 Kafka（partition=" + sendResult.getRecordMetadata().partition()
+                                        + ", offset=" + sendResult.getRecordMetadata().offset() + "）");
                         log.info("本地消息投递成功，orderId={}, partition={}, offset={}",
                                 message.getOrderId(),
                                 sendResult.getRecordMetadata().partition(),
@@ -126,20 +142,34 @@ public class SeckillMessageRelay {
                 },
                 ex -> {
                     log.error("本地消息投递失败，退避后重试，orderId={}", message.getOrderId(), ex);
-                    releaseForRetry(message);
+                    releaseForRetry(message, ex.getMessage());
                 });
     }
 
-    /** 投递失败：从 PROCESSING 置回 READY，retry+1，并按指数退避设置 next_retry_time */
-    private void releaseForRetry(SeckillMessage message) {
+    /**
+     * 投递失败：从 PROCESSING 置回 READY（常规段）或 FAILED（告警段），retry+1，
+     * 并按退避策略设置 next_retry_time。达到告警阈值后走慢速通道但不会停止重试。
+     */
+    private void releaseForRetry(SeckillMessage message, String errorMessage) {
         int retry = message.getRetry() == null ? 0 : message.getRetry();
-        long delaySeconds = Math.min(MAX_BACKOFF_SECONDS, 1L << Math.min(retry, 8));
-        seckillMessageMapper.update(null,
+        long delaySeconds = SeckillRetryPolicy.backoffSeconds(retry);
+        int nextStatus = SeckillRetryPolicy.statusForRetry(retry);
+        int updated = seckillMessageMapper.update(null,
                 new UpdateWrapper<SeckillMessage>()
                         .eq("order_id", message.getOrderId())
                         .eq("status", SeckillMessage.STATUS_PROCESSING)
-                        .set("status", SeckillMessage.STATUS_READY)
+                        .set("status", nextStatus)
                         .setSql("retry = retry + 1, next_retry_time = DATE_ADD(NOW(), INTERVAL "
                                 + delaySeconds + " SECOND)"));
+        if (updated > 0) {
+            seckillEventLogger.warn(message.getOrderId(), message.getUserId(), message.getVoucherId(),
+                    SeckillEventLogger.STAGE_RELAY_SEND_FAILED,
+                    "第 " + (retry + 1) + " 次投递 Kafka 失败，置回 " + statusLabel(nextStatus)
+                            + "，退避 " + delaySeconds + "s 后自动重试；错误：" + errorMessage);
+        }
+    }
+
+    private String statusLabel(int status) {
+        return status == SeckillMessage.STATUS_FAILED ? "FAILED(慢速通道)" : "READY";
     }
 }

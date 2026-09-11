@@ -13,7 +13,10 @@ local stockKey = 'seckill:stock:' .. voucherId
 local orderKey = 'seckill:order:' .. voucherId
 
 -- 3.脚本业务
-if(tonumber(redis.call('get', stockKey)) <= 0) then
+-- 库存 key 不存在（活动未初始化或已过期被清理）时 redis.call('get') 返回 false，
+-- 直接 tonumber 会得到 nil 并让 `nil <= 0` 抛错，因此先判 false。
+local stock = redis.call('get', stockKey)
+if (stock == false or tonumber(stock) <= 0) then
     return 1
 end
 if(redis.call('sismember', orderKey, userId) == 1) then

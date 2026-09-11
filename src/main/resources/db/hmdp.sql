@@ -1268,14 +1268,20 @@ CREATE TABLE `tb_voucher_order`  (
   `user_id` bigint(20) UNSIGNED NOT NULL COMMENT '下单的用户id',
   `voucher_id` bigint(20) UNSIGNED NOT NULL COMMENT '购买的代金券id',
   `pay_type` tinyint(1) UNSIGNED NOT NULL DEFAULT 1 COMMENT '支付方式 1：余额支付；2：支付宝；3：微信',
-  `status` tinyint(1) UNSIGNED NOT NULL DEFAULT 1 COMMENT '订单状态，1：未支付；2：已支付；3：已核销；4：已取消；5：退款中；6：已退款',
+  `status` tinyint(1) UNSIGNED NOT NULL DEFAULT 1 COMMENT '预约状态，1：待支付；2：待核销；3：已核销；4：已取消；5：退款中；6：已退款；7：关闭处理中',
   `create_time` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '下单时间',
   `pay_time` timestamp NULL DEFAULT NULL COMMENT '支付时间',
   `use_time` timestamp NULL DEFAULT NULL COMMENT '核销时间',
   `refund_time` timestamp NULL DEFAULT NULL COMMENT '退款时间',
   `update_time` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+  `close_retry` int(11) NOT NULL DEFAULT 0 COMMENT '关单补偿重试次数',
+  `close_next_retry_time` timestamp NULL DEFAULT NULL COMMENT '下次关单补偿时间',
+  `close_last_error` varchar(500) NULL DEFAULT NULL COMMENT '最近一次关单补偿异常',
+  `close_reason` varchar(32) NULL DEFAULT NULL COMMENT 'USER_CANCEL 或 PAYMENT_TIMEOUT',
   PRIMARY KEY (`id`) USING BTREE,
-  UNIQUE INDEX `uk_user_voucher`(`user_id`, `voucher_id`) USING BTREE
+  UNIQUE INDEX `uk_user_voucher`(`user_id`, `voucher_id`) USING BTREE,
+  INDEX `idx_status_create_time`(`status`, `create_time`) USING BTREE,
+  INDEX `idx_status_close_retry`(`status`, `close_next_retry_time`, `update_time`) USING BTREE
 ) ENGINE = InnoDB CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci ROW_FORMAT = Compact;
 
 -- ----------------------------
@@ -1296,7 +1302,49 @@ CREATE TABLE `tb_seckill_message`  (
   `create_time` timestamp(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) COMMENT '创建时间',
   `update_time` timestamp(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3) COMMENT '更新时间',
   PRIMARY KEY (`order_id`) USING BTREE,
-  INDEX `idx_status_create`(`status`, `create_time`) USING BTREE
+  -- Relay 扫描（status + next_retry_time 到期）与卡死对账，按 create_time 取待投递消息
+  INDEX `idx_status_next_retry_create`(`status`, `next_retry_time`, `create_time`) USING BTREE,
+  -- 库存对账按券 + 状态统计未落库准入数
+  INDEX `idx_voucher_status`(`voucher_id`, `status`) USING BTREE
+) ENGINE = InnoDB CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci ROW_FORMAT = Compact;
+
+-- ----------------------------
+-- Table structure for tb_seckill_message_event
+-- ----------------------------
+-- 秒杀链路时间线：以 order_id 为 trace id 的 append-only 事件流。
+-- 每个关键节点（Redis 准入 / 投 outbox / Kafka 投递 / 消费落库 / 重试 / 恢复 / 对账 / 人工重放）
+-- 各写一条事件，id 自增即为时间线顺序。仅供观测，写失败不影响业务。
+DROP TABLE IF EXISTS `tb_seckill_message_event`;
+CREATE TABLE `tb_seckill_message_event`  (
+  `id` bigint(20) NOT NULL AUTO_INCREMENT COMMENT '事件序号，自增即时间线顺序',
+  `order_id` bigint(20) NOT NULL COMMENT '订单id（链路 trace id）',
+  `user_id` bigint(20) NULL DEFAULT NULL COMMENT '用户id',
+  `voucher_id` bigint(20) NULL DEFAULT NULL COMMENT '券id',
+  `stage` varchar(40) NOT NULL COMMENT '阶段码，见 SeckillEventLogger 常量',
+  `level` varchar(8) NOT NULL DEFAULT 'INFO' COMMENT '级别：INFO/WARN/ERROR，决定时间线圆点颜色',
+  `detail` varchar(500) NULL DEFAULT NULL COMMENT '人话描述（含重试次数、offset、错误摘要）',
+  `create_time` timestamp(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) COMMENT '事件发生时间',
+  PRIMARY KEY (`id`) USING BTREE,
+  INDEX `idx_order_id`(`order_id`, `id`) USING BTREE,
+  INDEX `idx_create_time`(`create_time`) USING BTREE
+) ENGINE = InnoDB CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci ROW_FORMAT = Compact;
+
+-- ----------------------------
+-- Table structure for tb_cache_invalidation
+-- ----------------------------
+DROP TABLE IF EXISTS `tb_cache_invalidation`;
+CREATE TABLE `tb_cache_invalidation`  (
+  `id` bigint(20) UNSIGNED NOT NULL AUTO_INCREMENT,
+  `cache_key` varchar(255) NOT NULL COMMENT '待失效的缓存 key',
+  `lock_key` varchar(255) NOT NULL COMMENT '与缓存重建共用的锁 key',
+  `status` tinyint(1) NOT NULL DEFAULT 0 COMMENT '0待处理，1已完成',
+  `retry` int(11) NOT NULL DEFAULT 0 COMMENT '重试次数',
+  `next_retry_time` timestamp NULL DEFAULT NULL COMMENT '下次重试时间',
+  `last_error` varchar(500) NULL DEFAULT NULL COMMENT '最近一次错误',
+  `create_time` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `update_time` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`) USING BTREE,
+  INDEX `idx_status_retry`(`status`, `next_retry_time`, `create_time`) USING BTREE
 ) ENGINE = InnoDB CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci ROW_FORMAT = Compact;
 
 SET FOREIGN_KEY_CHECKS = 1;

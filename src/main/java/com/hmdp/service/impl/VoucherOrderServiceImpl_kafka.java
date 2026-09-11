@@ -7,8 +7,10 @@ import com.hmdp.entity.SeckillMessage;
 import com.hmdp.entity.VoucherOrder;
 import com.hmdp.mapper.SeckillMessageMapper;
 import com.hmdp.mapper.VoucherOrderMapper;
+import com.hmdp.monitor.SeckillEventLogger;
 import com.hmdp.service.ISeckillVoucherService;
 import com.hmdp.service.IVoucherOrderService;
+import com.hmdp.service.VoucherOrderLifecycleService;
 import com.hmdp.utils.RedisIdWorker;
 import com.hmdp.utils.UserHolder;
 import lombok.extern.slf4j.Slf4j;
@@ -23,7 +25,9 @@ import javax.annotation.Resource;
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
+import java.time.LocalDateTime;
 import java.util.Collections;
+import java.util.List;
 
 @Service
 @Slf4j
@@ -40,6 +44,12 @@ public class VoucherOrderServiceImpl_kafka extends ServiceImpl<VoucherOrderMappe
 
     @Resource
     private SeckillMessageMapper seckillMessageMapper;
+
+    @Resource
+    private SeckillEventLogger seckillEventLogger;
+
+    @Resource
+    private VoucherOrderLifecycleService voucherOrderLifecycleService;
 
     private static final DefaultRedisScript<Long> SECKILL_SCRIPT;
 
@@ -81,6 +91,10 @@ public class VoucherOrderServiceImpl_kafka extends ServiceImpl<VoucherOrderMappe
             return Result.fail(r == 1 ? "库存不足" : "不能重复下单");
         }
 
+        // 时间线起点：Lua 已在 Redis 原子完成「扣库存 + 一人一单」，这就是准入真值
+        seckillEventLogger.info(orderId, userId, voucherId, SeckillEventLogger.STAGE_REDIS_ADMIT,
+                "Redis 预扣库存成功、一人一单校验通过（voucherId=" + voucherId + "）");
+
         // lua 已把 orderId 原子写入 Redis（seckill:admitted），Redis 即准入真值。
         // 这里落 outbox 只是为了加速投递；即便失败，恢复任务也会依据 Redis 把订单补齐。
         try {
@@ -90,12 +104,90 @@ public class VoucherOrderServiceImpl_kafka extends ServiceImpl<VoucherOrderMappe
                     .setVoucherId(voucherId)
                     .setStatus(SeckillMessage.STATUS_READY)
                     .setRetry(0));
+            seckillEventLogger.info(orderId, userId, voucherId, SeckillEventLogger.STAGE_OUTBOX_WRITTEN,
+                    "已写入 outbox（status=READY），等待 relay 投递 Kafka");
         } catch (Exception e) {
+            seckillEventLogger.warn(orderId, userId, voucherId, SeckillEventLogger.STAGE_OUTBOX_WRITE_FAILED,
+                    "写 outbox 失败，Redis 已准入，将由恢复任务依据 Redis 补单：" + e.getMessage());
             log.error("秒杀资格落本地消息表失败，将由恢复任务依据 Redis 补单，orderId={}, userId={}, voucherId={}",
                     orderId, userId, voucherId, e);
         }
         log.info("秒杀资格已准入，orderId={}, userId={}, voucherId={}", orderId, userId, voucherId);
-        return Result.ok(orderId);
+        // 雪花 ID 超出 JavaScript 安全整数范围时会丢精度，接口统一按字符串返回。
+        return Result.ok(String.valueOf(orderId));
+    }
+
+    public Result queryMyOrders() {
+        Long userId = UserHolder.getUser().getId();
+        List<VoucherOrder> orders = lambdaQuery()
+                .eq(VoucherOrder::getUserId, userId)
+                .orderByDesc(VoucherOrder::getCreateTime)
+                .list();
+        orders.stream()
+                .filter(order -> Integer.valueOf(VoucherOrder.STATUS_PENDING_PAYMENT).equals(order.getStatus()))
+                .forEach(order -> order.setPaymentDeadline(
+                        voucherOrderLifecycleService.paymentDeadline(order)));
+        return Result.ok(orders);
+    }
+
+    public Result queryWorkshopOrderForRedeem(String verificationCode) {
+        Long orderId = parseVerificationCode(verificationCode);
+        if (orderId == null) {
+            return Result.fail("核销码格式不正确");
+        }
+        VoucherOrder order = getById(orderId);
+        return order == null ? Result.fail("未找到对应预约订单") : Result.ok(order);
+    }
+
+    /**
+     * 只允许已确认预约从待核销(2)原子迁移为已核销(3)，并发重复提交只会成功一次。
+     */
+    public Result redeemWorkshopOrder(String verificationCode) {
+        Long orderId = parseVerificationCode(verificationCode);
+        if (orderId == null) {
+            return Result.fail("核销码格式不正确");
+        }
+
+        VoucherOrder order = getById(orderId);
+        if (order == null) {
+            return Result.fail("未找到对应预约订单");
+        }
+        if (Integer.valueOf(VoucherOrder.STATUS_REDEEMED).equals(order.getStatus())) {
+            return Result.fail("该预约已经核销，请勿重复操作");
+        }
+        if (!Integer.valueOf(VoucherOrder.STATUS_PENDING_REDEMPTION).equals(order.getStatus())) {
+            return Result.fail("只有已确认、待核销的预约才能核销");
+        }
+
+        LocalDateTime now = LocalDateTime.now();
+        boolean updated = update(new UpdateWrapper<VoucherOrder>()
+                .eq("id", orderId)
+                .eq("status", VoucherOrder.STATUS_PENDING_REDEMPTION)
+                .set("status", VoucherOrder.STATUS_REDEEMED)
+                .set("use_time", now)
+                .set("update_time", now));
+        if (!updated) {
+            return Result.fail("订单状态已变化，请刷新后重试");
+        }
+        return Result.ok(getById(orderId));
+    }
+
+    private Long parseVerificationCode(String verificationCode) {
+        if (verificationCode == null) {
+            return null;
+        }
+        String value = verificationCode.trim();
+        if (value.regionMatches(true, 0, "WS-", 0, 3)) {
+            value = value.substring(3);
+        }
+        if (value.isEmpty() || !value.matches("\\d+")) {
+            return null;
+        }
+        try {
+            return Long.valueOf(value);
+        } catch (NumberFormatException e) {
+            return null;
+        }
     }
 
     @Override
@@ -104,8 +196,36 @@ public class VoucherOrderServiceImpl_kafka extends ServiceImpl<VoucherOrderMappe
         Long userId = voucherOrder.getUserId();
         Long voucherId = voucherOrder.getVoucherId();
 
-        // 先写订单，以数据库唯一键作为幂等和一人一单的最终闸门
-        save(voucherOrder);
+        // 数据库唯一键作为一人一单的最终闸门。已取消订单允许复用该行并换成新的订单号，
+        // 这样关单释放 Redis 资格后，用户可以重新抢券，同时不需要放松数据库唯一约束。
+        VoucherOrder cancelledOrder = lambdaQuery()
+                .eq(VoucherOrder::getUserId, userId)
+                .eq(VoucherOrder::getVoucherId, voucherId)
+                .eq(VoucherOrder::getStatus, VoucherOrder.STATUS_CANCELLED)
+                .last("limit 1")
+                .one();
+        if (cancelledOrder == null) {
+            save(voucherOrder);
+        } else {
+            LocalDateTime now = LocalDateTime.now();
+            boolean reactivated = update(new UpdateWrapper<VoucherOrder>()
+                    .eq("id", cancelledOrder.getId())
+                    .eq("status", VoucherOrder.STATUS_CANCELLED)
+                    .set("id", voucherOrder.getId())
+                    .set("status", VoucherOrder.STATUS_PENDING_PAYMENT)
+                    .set("create_time", now)
+                    .set("pay_time", null)
+                    .set("use_time", null)
+                    .set("refund_time", null)
+                    .set("close_retry", 0)
+                    .set("close_next_retry_time", null)
+                    .set("close_last_error", null)
+                    .set("close_reason", null)
+                    .set("update_time", now));
+            if (!reactivated) {
+                throw new IllegalStateException("已取消预约重新激活失败，orderId=" + voucherOrder.getId());
+            }
+        }
         log.info("MySQL 秒杀订单已插入当前事务（待提交），orderId={}, userId={}, voucherId={}",
                 voucherOrder.getId(), userId, voucherId);
 

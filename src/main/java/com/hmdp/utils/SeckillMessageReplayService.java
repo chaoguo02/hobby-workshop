@@ -4,6 +4,7 @@ import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
 import com.baomidou.mybatisplus.core.conditions.update.UpdateWrapper;
 import com.hmdp.entity.SeckillMessage;
 import com.hmdp.mapper.SeckillMessageMapper;
+import com.hmdp.monitor.SeckillEventLogger;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 
@@ -11,8 +12,9 @@ import javax.annotation.Resource;
 import java.util.List;
 
 /**
- * FAILED 消息的人工重放入口。FAILED 是重投多次仍失败的终态，本来只告警、只能人工改库；
- * 这里把 FAILED 条件重置为 READY（retry 归零、清退避），交回 relay 正常投递。
+ * FAILED 消息的人工重放入口。FAILED 不是终态：relay 会按最长 1h 的退避自动重投，
+ * 本接口把 FAILED 条件重置为 READY（retry 归零、清退避），只用于**加速**处理，
+ * 不是「每笔准入最终落库」的唯一恢复手段。
  * 只允许从 FAILED 迁移，避免误动在途（READY/PROCESSING/SENT）的消息。
  */
 @Component
@@ -24,8 +26,12 @@ public class SeckillMessageReplayService {
     @Resource
     private SeckillMessageMapper seckillMessageMapper;
 
+    @Resource
+    private SeckillEventLogger seckillEventLogger;
+
     /** 单条重放；返回是否命中并重置了一条 FAILED 消息 */
     public boolean replay(Long orderId) {
+        SeckillMessage message = seckillMessageMapper.selectById(orderId);
         int updated = seckillMessageMapper.update(null,
                 new UpdateWrapper<SeckillMessage>()
                         .eq("order_id", orderId)
@@ -34,6 +40,11 @@ public class SeckillMessageReplayService {
                         .set("retry", 0)
                         .set("next_retry_time", null));
         if (updated > 0) {
+            seckillEventLogger.warn(orderId,
+                    message == null ? null : message.getUserId(),
+                    message == null ? null : message.getVoucherId(),
+                    SeckillEventLogger.STAGE_MANUAL_REPLAY,
+                    "人工重放：FAILED → READY，retry 归零、清退避，由 relay 立即重投");
             log.warn("人工重放：FAILED -> READY，orderId={}", orderId);
             return true;
         }
