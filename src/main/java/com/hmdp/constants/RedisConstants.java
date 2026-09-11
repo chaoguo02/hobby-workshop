@@ -16,8 +16,15 @@ public class RedisConstants {
 
     public static final String LOCK_SHOP_KEY = "lock:shop:";
     public static final Long LOCK_SHOP_TTL = 10L;
+    public static final String CACHE_INVALIDATE_CHANNEL = "cache:invalidate";
 
     public static final String SECKILL_STOCK_KEY = "seckill:stock:";
+    /** 一人一单集合，Lua 里跟随库存 key 的 TTL 过期 */
+    public static final String SECKILL_ORDER_KEY = "seckill:order:";
+    /** 已准入 orderId→userId，恢复任务据此补齐 outbox */
+    public static final String SECKILL_ADMITTED_KEY = "seckill:admitted:";
+    /** 已完成关单补偿的 orderId 集合，用于 Redis 库存回补幂等 */
+    public static final String SECKILL_CLOSED_KEY = "seckill:closed:";
     public static final String BLOG_LIKED_KEY = "blog:liked:";
     public static final String FEED_KEY = "feed:";
     public static final String SHOP_GEO_KEY = "shop:geo:";
