@@ -3,6 +3,7 @@ package com.hmdp.controller;
 
 import cn.hutool.core.bean.BeanUtil;
 import cn.hutool.core.util.RandomUtil;
+import com.hmdp.annotation.RateLimit;
 import com.hmdp.dto.LoginFormDTO;
 import com.hmdp.dto.Result;
 import com.hmdp.dto.UserDTO;
@@ -31,7 +32,13 @@ public class UserController {
 
     /**
      * 发送手机验证码
+     *
+     * <p>按手机号限流：capacity=1 表示桶里最多 1 个令牌，rate=1/60 表示每 60 秒补 1 个，
+     * 合起来就是「同一手机号 60 秒内只能发一次」。这个接口是免登录的，ThreadLocal 里没有用户，
+     * 所以维度只能取入参 phone。
      */
+    @RateLimit(keyPrefix = "sms:send", key = "#phone", capacity = 1, rate = 1.0 / 60,
+            message = "验证码发送过于频繁，请 1 分钟后再试")
     @PostMapping("code")
     public Result sendCode(@RequestParam("phone") String phone, HttpSession session) {
         return userService.sendCode(phone, session);
