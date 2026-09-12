@@ -25,9 +25,6 @@ public class RedisConstants {
     public static final String SECKILL_ADMITTED_KEY = "seckill:admitted:";
     /** 已完成关单补偿的 orderId 集合，用于 Redis 库存回补幂等 */
     public static final String SECKILL_CLOSED_KEY = "seckill:closed:";
-    public static final String BLOG_LIKED_KEY = "blog:liked:";
-    public static final String FEED_KEY = "feed:";
-    public static final String SHOP_GEO_KEY = "shop:geo:";
     public static final String USER_SIGN_KEY = "sign:";
 
 }
