@@ -1,6 +1,7 @@
 # 秒杀完整链路
 
 > 面向「从抢购到核销/关单」的全过程说明，包含数据流、状态机、兜底机制与可观测性。
+> 想看每一步真正落到 MySQL 的语句，见[秒杀全流程真实 SQL](./seckill-sql-flow.md)。
 > 相关源码路径见文末。
 
 ## 0. 总览
@@ -185,6 +186,7 @@ MySQL 没扣（消息卡住/FAILED），重放后自动消除。
 
 | 关注点 | 路径 |
 |---|---|
+| 全流程真实 SQL（复习用） | `docs/seckill-sql-flow.md` |
 | 准入脚本 | `src/main/resources/seckill.lua` |
 | 关单补偿脚本 | `src/main/resources/close-voucher-order.lua` |
 | 秒杀入口 | `src/main/java/com/hmdp/service/impl/VoucherOrderServiceImpl_kafka.java` |

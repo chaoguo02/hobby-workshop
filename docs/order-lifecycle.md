@@ -2,6 +2,7 @@
 
 > 承接[秒杀完整链路](./seckill-chain.md)。起点是**订单已写入 MySQL、MySQL 库存已扣减、
 > outbox 置 `COMPLETED`** 的那一刻——秒杀准入到此结束，之后进入订单生命周期。
+> 每一步真正落到 MySQL 的语句见[秒杀全流程真实 SQL](./seckill-sql-flow.md)。
 > 相关源码路径见文末。
 
 ## 0. 总览
@@ -206,6 +207,7 @@ MySQL库存 = Redis库存 + 未落库准入数
 
 | 关注点 | 路径 |
 |---|---|
+| 全流程真实 SQL（复习用） | `docs/seckill-sql-flow.md` |
 | 支付 / 取消 / 关单受理 / Redis 补偿 | `src/main/java/com/hmdp/service/VoucherOrderLifecycleService.java` |
 | 超时扫描与补偿重试 | `src/main/java/com/hmdp/utils/VoucherOrderCloseTask.java` |
 | 关单补偿脚本 | `src/main/resources/close-voucher-order.lua` |
